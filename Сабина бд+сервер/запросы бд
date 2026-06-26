@@ -1,0 +1,714 @@
+--каналы крч
+create table if not exists channels (
+    id          bigserial primary key,
+    name        text not null,
+    tg_id       bigint not null unique,
+    username    text,
+    first_seen  timestamptz default now(),
+    last_seen   timestamptz default now()
+);
+
+create index if not exists idx_channels_tg_id on channels (tg_id);
+create index if not exists idx_channels_name  on channels (name);
+
+
+-- тут посты
+create table if not exists posts (
+    id                  bigserial primary key,
+    channel_id          bigint not null references channels(id) on delete cascade,
+
+    message_id          bigint not null,
+    message_link        text,
+    message_date        timestamptz,
+
+    sender_id           bigint,
+    sender_type         text,
+
+    raw_text            text,
+    normalized_text     text,
+
+    category            text not null,
+    category_raw        text,
+    risk_score          real default 0.0,
+    explanation         text,
+
+    prefilter_hints     text[],
+
+    analyzed_at         timestamptz default now(),
+    model               text,
+
+    is_suspicious       boolean generated always as (category <> 'CLEAN' and risk_score >= 0.5) stored,
+    created_at          timestamptz default now(),
+
+    unique (channel_id, message_id)
+);
+
+create index if not exists idx_posts_channel      on posts (channel_id);
+create index if not exists idx_posts_category     on posts (category);
+create index if not exists idx_posts_risk_score   on posts (risk_score desc);
+create index if not exists idx_posts_is_suspicious on posts (is_suspicious) where is_suspicious = true;
+create index if not exists idx_posts_sender_id    on posts (sender_id);
+create index if not exists idx_posts_message_date on posts (message_date desc);  -- для фильтров по дате
+
+
+-- красные флаги
+create table if not exists red_flags (
+    id          bigserial primary key,
+    post_id     bigint not null references posts(id) on delete cascade,
+    flag_text   text not null
+);
+
+create index if not exists idx_red_flags_post on red_flags (post_id);
+
+
+--связала каналы
+create table if not exists channel_links (
+    id                  bigserial primary key,
+
+    source_channel_id   bigint not null references channels(id) on delete cascade,
+    source_post_id      bigint references posts(id) on delete set null,
+
+    target              text not null,
+    link_type           text not null,      -- 'bot' | 'channel' | 'invite' | 'other'
+    discovered_url      text,
+    button_text         text,
+
+    found_at            timestamptz default now()
+);
+
+create unique index if not exists idx_channel_links_unique_with_post
+    on channel_links (source_channel_id, source_post_id, target)
+    where source_post_id is not null;
+
+create unique index if not exists idx_channel_links_unique_no_post
+    on channel_links (source_channel_id, target)
+    where source_post_id is null;
+
+create index if not exists idx_channel_links_source on channel_links (source_channel_id);
+create index if not exists idx_channel_links_target on channel_links (target);
+create index if not exists idx_channel_links_type   on channel_links (link_type);
+
+
+--криптокош
+-- адреса кошельков, упоминаемых в постах
+create table if not exists crypto_wallets (
+    id          bigserial primary key,
+    address     text not null unique,
+    chain       text,                       -- 'ETH' | 'TRX' | 'BTC' | 'SOL' | null
+    first_seen  timestamptz default now(),
+    last_seen   timestamptz default now(),
+    -- Поля, заполняемые при интеграции с блокчейн-эксплорером (Расул):
+    tx_count    int,
+    total_volume_usd numeric(20, 2),
+    risk_label  text                        -- 'HIGH' | 'MEDIUM' | 'LOW' | null
+);
+
+create index if not exists idx_wallets_address on crypto_wallets (address);
+create index if not exists idx_wallets_chain   on crypto_wallets (chain);
+
+
+create table if not exists wallet_mentions (
+    id          bigserial primary key,
+    wallet_id   bigint not null references crypto_wallets(id) on delete cascade,
+    post_id     bigint not null references posts(id) on delete cascade,
+    found_at    timestamptz default now(),
+
+    unique (wallet_id, post_id)
+);
+
+create index if not exists idx_wallet_mentions_wallet on wallet_mentions (wallet_id);
+create index if not exists idx_wallet_mentions_post   on wallet_mentions (post_id);
+
+
+-- статьи
+create table if not exists legal_articles (
+    id              bigserial primary key,
+    code            text not null,          -- 'УК' | 'КоАП'
+    article_number  text not null,          -- '297' | '303' | '184' и т.д.
+    title           text not null,          -- краткое название статьи
+    description     text,                   -- текст или ключевые пункты статьи
+    categories      text[] not null,        -- к каким категориям QARMAQ относится: DRUG, DROP, и т.д.
+    max_penalty     text,                   -- '10 лет' | 'штраф до 500 МРП' и т.д.
+    adilet_url      text,                   -- ссылка на adilet.zan.kz (открыть вручную)
+    created_at      timestamptz default now(),
+
+    unique (code, article_number)
+);
+
+create index if not exists idx_legal_articles_categories on legal_articles using gin (categories);
+
+
+-- привяз ст к постам
+create table if not exists post_articles (
+    id          bigserial primary key,
+    post_id     bigint not null references posts(id) on delete cascade,
+    article_id  bigint not null references legal_articles(id) on delete cascade,
+
+    unique (post_id, article_id)
+);
+
+create index if not exists idx_post_articles_post    on post_articles (post_id);
+create index if not exists idx_post_articles_article on post_articles (article_id);
+
+
+create or replace view all_data as
+select
+    p.id,
+    c.name              as channel_name,
+    c.tg_id             as channel_tg_id,
+    c.username          as channel_username,
+    p.message_id,
+    p.message_link,
+    p.message_date,
+    p.sender_id,
+    p.sender_type,
+    p.raw_text,
+    p.normalized_text,
+    p.category,
+    p.category_raw,
+    p.risk_score,
+    p.explanation,
+    p.prefilter_hints,
+    p.is_suspicious,
+    p.analyzed_at,
+    p.model,
+    coalesce(
+        (select array_agg(flag_text) from red_flags where post_id = p.id),
+        '{}'
+    ) as red_flags,
+    coalesce(
+        (select array_agg(wm.wallet_id::text) from wallet_mentions wm where wm.post_id = p.id),
+        '{}'
+    ) as wallet_ids,
+    coalesce(
+        (select array_agg(cw.address) from wallet_mentions wm join crypto_wallets cw on cw.id = wm.wallet_id where wm.post_id = p.id),
+        '{}'
+    ) as wallets,
+    -- ⬇ НОВЫЕ КОЛОНКИ ДЛЯ СТАТЕЙ 
+    coalesce(
+        (select array_agg(la.article_number) 
+         from post_articles pa 
+         join legal_articles la on la.id = pa.article_id 
+         where pa.post_id = p.id),
+        '{}'
+    ) as article_numbers,
+    coalesce(
+        (select array_agg(la.code || ' ' || la.article_number) 
+         from post_articles pa 
+         join legal_articles la on la.id = pa.article_id 
+         where pa.post_id = p.id),
+        '{}'
+    ) as article_labels,
+    coalesce(
+        (select array_agg(la.adilet_url) 
+         from post_articles pa 
+         join legal_articles la on la.id = pa.article_id 
+         where pa.post_id = p.id),
+        '{}'
+    ) as article_links,
+    coalesce(
+        (select array_agg(la.max_penalty) 
+         from post_articles pa 
+         join legal_articles la on la.id = pa.article_id 
+         where pa.post_id = p.id),
+        '{}'
+    ) as article_penalties
+from posts p
+join channels c on c.id = p.channel_id
+order by p.risk_score desc;
+
+
+
+-- Граф связей (для NetworkX/vis.js у Расула)
+create or replace view channel_graph as
+select
+    cl.id,
+    c.id            as source_channel_id,
+    c.name          as source_channel_name,
+    c.tg_id         as source_channel_tg_id,
+    cl.target,
+    cl.link_type,
+    cl.discovered_url,
+    cl.found_at,
+    p.risk_score    as source_post_risk_score,
+    p.category      as source_post_category
+from channel_links cl
+join channels c on c.id = cl.source_channel_id
+left join posts p on p.id = cl.source_post_id;
+
+
+create or replace view mentions_summary as
+select
+    target,
+    link_type,
+    count(*)                          as total_mentions,
+    count(distinct source_channel_id) as mentioned_by_count,
+    array_agg(distinct c.name)        as mentioned_by_channels
+from channel_links cl
+join channels c on c.id = cl.source_channel_id
+group by target, link_type
+order by total_mentions desc;
+
+
+create or replace view wallet_dossier as
+select
+    cw.id               as wallet_id,
+    cw.address,
+    cw.chain,
+    cw.first_seen,
+    cw.last_seen,
+    cw.tx_count,
+    cw.total_volume_usd,
+    cw.risk_label,
+    count(distinct wm.post_id)      as mention_count,
+    count(distinct p.channel_id)    as channel_count,
+    array_agg(distinct ch.name)     as mentioned_in_channels,
+    array_agg(distinct p.category)  as categories_found,
+    max(p.risk_score)               as max_post_risk_score
+from crypto_wallets cw
+left join wallet_mentions wm on wm.wallet_id = cw.id
+left join posts p on p.id = wm.post_id
+left join channels ch on ch.id = p.channel_id
+group by cw.id;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-- для бота отдельная табл
+
+create table bot_states (
+    chat_id         bigint primary key,
+    username        text,
+    state           int default 0,
+    last_message    text,
+    last_message_at timestamptz default now(),
+    updated_at      timestamptz default now()
+);
+
+-- история сообщ
+create table bot_messages (
+    id              bigserial primary key,
+    chat_id         bigint not null references bot_states(chat_id) on delete cascade,
+    username        text,
+    message_text    text,
+    is_from_user    boolean default true,   -- true = от пользователя, false = от бота
+    created_at      timestamptz default now()
+);
+
+-- индексы для скорости
+create index idx_bot_messages_chat on bot_messages (chat_id);
+create index idx_bot_messages_created on bot_messages (created_at desc);
+create index idx_bot_states_updated on bot_states (updated_at desc);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--статьи
+insert into legal_articles (code, article_number, title, description, categories, max_penalty, adilet_url)
+values
+(
+    'УК', '217',
+    'Создание и руководство финансовой (инвестиционной) пирамидой',
+    'Организация деятельности по извлечению дохода от привлечения денег физических и (или) юридических лиц без использования привлечённых средств на предпринимательскую деятельность, путём перераспределения активов и обогащения одних участников за счёт взносов других.',
+    ARRAY['PYRAMID'],
+    'до 12 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '217-1',
+    'Реклама финансовой (инвестиционной) пирамиды',
+    'Отдельный состав именно за рекламу пирамиды (не за её создание) — применим к рекламному посту в Telegram.',
+    ARRAY['PYRAMID'],
+    'штраф/общественные работы/лишение свободы (см. точный текст на Adilet)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '190',
+    'Мошенничество',
+    'Хищение чужого имущества или приобретение права на чужое имущество путём обмана или злоупотребления доверием.',
+    ARRAY['PYRAMID', 'SUSPICIOUS_JOB'],
+    'до 10 лет лишения свободы (особо крупный размер)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '297',
+    'Незаконные приобретение, хранение, перевозка в целях сбыта, пересылка либо сбыт наркотических средств',
+    'Незаконные приобретение, хранение, перевозка в целях сбыта, пересылка либо сбыт наркотических средств, психотропных веществ, их аналогов.',
+    ARRAY['DRUG'],
+    'от 5 до 12 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '296',
+    'Незаконное обращение с наркотическими средствами без цели сбыта',
+    'Незаконные изготовление, переработка, приобретение, хранение, перевозка без цели сбыта наркотических средств, психотропных веществ, их аналогов.',
+    ARRAY['DRUG'],
+    'штраф либо лишение свободы до 7 лет (особо крупный размер)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '299-1',
+    'Пропаганда или незаконная реклама наркотических средств',
+    'Пропаганда или незаконная реклама наркотических средств, психотропных веществ или их аналогов, прекурсоров — напрямую применимо к рекламным постам в Telegram.',
+    ARRAY['DRUG'],
+    'см. точный текст на Adilet',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '218',
+    'Легализация (отмывание) денег и (или) иного имущества, полученных преступным путём',
+    'Вовлечение в законный оборот денег и (или) иного имущества, полученных преступным путём, посредством совершения сделок в виде конверсии или перевода имущества, либо владение и использование такого имущества.',
+    ARRAY['DROP', 'PYRAMID'],
+    'до 10 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '214',
+    'Незаконное предпринимательство',
+    'Осуществление предпринимательской деятельности без регистрации или лицензии, занятие запрещёнными видами деятельности с крупным доходом/ущербом. Подтверждённый случай применения — незаконный обмен криптовалюты.',
+    ARRAY['DROP'],
+    'до 5 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '214-1',
+    'Незаконная банковская, микрофинансовая деятельность',
+    'Осуществление банковской деятельности (банковских операций), микрофинансовой деятельности без регистрации либо без обязательной лицензии — применимо к схемам обнала через подставных лиц (дропов).',
+    ARRAY['DROP'],
+    'до 5 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+
+  (
+    'УК', '307',
+    'Организация незаконного игорного бизнеса',
+    'Незаконное открытие либо содержание игорного заведения, организация деятельности электронного казино и интернет-казино либо осуществление деятельности в сфере игорного бизнеса без лицензии.',
+    ARRAY['CASINO'],
+    'до 2 лет лишения свободы с конфискацией имущества (до 7 лет при квалифицирующих признаках)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'КоАП', '444',
+    'Участие, вовлечение или допуск к азартным играм',
+    'Участие в азартных играх в неотведённых для этого местах, а равно вовлечение или допуск граждан (в том числе ограниченных в участии) к азартным играм без специального разрешения — применимо к постам, вовлекающим игроков, а не только к организаторам.',
+    ARRAY['CASINO'],
+    'штраф 200-1000 МРП с конфискацией денег и игральных принадлежностей',
+    'https://adilet.zan.kz/rus/docs/K140000235'
+),
+(
+    'УК', '205',
+    'Неправомерный доступ к информации, в информационную систему или сеть телекоммуникаций',
+    'Умышленный неправомерный доступ к охраняемой законом информации, повлекший существенное нарушение прав и законных интересов граждан, организаций — применимо к взлому баз данных перед утечкой.',
+    ARRAY['LEAK'],
+    'штраф/арест/ограничение свободы (см. точный текст на Adilet)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '147',
+    'Нарушение неприкосновенности частной жизни и законодательства РК о персональных данных',
+    'Незаконное собирание сведений о частной жизни лица без его согласия, либо незаконный сбор, обработка или распространение персональных данных, причинившие существенный вред.',
+    ARRAY['LEAK'],
+    'до 7 лет лишения свободы (распространение, квалифицирующие признаки)',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+),
+(
+    'УК', '194',
+    'Вымогательство',
+    'Требование передачи чужого имущества или права на имущество под угрозой применения насилия, уничтожения имущества, либо под угрозой распространения позорящих сведений.',
+    ARRAY[]::text[],
+    'до 15 лет лишения свободы с конфискацией имущества',
+    'https://adilet.zan.kz/rus/docs/K1400000226'
+)
+on conflict (code, article_number) do update set
+    title = excluded.title,
+    description = excluded.description,
+    categories = excluded.categories,
+    max_penalty = excluded.max_penalty,
+    adilet_url = excluded.adilet_url;
+
+
+insert into post_articles (post_id, article_id)
+select p.id, la.id
+from posts p
+join legal_articles la on p.category = any(la.categories)
+where p.is_suspicious
+on conflict (post_id, article_id) do nothing;
+
+
+-- Проверка
+select code, article_number, title, categories from legal_articles order by code, article_number;
+
+select id, category, article_numbers, article_labels, article_links
+from all_data
+where category = 'CASINO'
+limit 10;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--сделала алерт
+create table if not exists alerts (
+    id              bigserial primary key,
+    channel_id      bigint references channels(id) on delete cascade,
+    post_id         bigint references posts(id) on delete set null,
+    wallet_id       bigint references crypto_wallets(id) on delete set null,
+
+    alert_type      text not null,
+
+    message         text,
+    risk_score      real,
+    is_read         boolean default false,
+    created_at      timestamptz default now()
+);
+
+create index if not exists idx_alerts_channel   on alerts (channel_id);
+create index if not exists idx_alerts_is_read   on alerts (is_read) where is_read = false;
+create index if not exists idx_alerts_created   on alerts (created_at desc);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--форум (тут,то что парсила аружан с даркнетом
+
+create table if not exists forum_posts (
+    id          bigserial primary key,
+    forum_name  text,                    -- 'probiv.work' | 'legalizer.cc'
+    title       text,
+    author      text,
+    post_text   text,
+    url         text,
+    intent      text,                    -- 'buy' | 'sell' | 'other'
+    category    text,                    -- LEAK | DROP | DRUG | PYRAMID и тд
+    parsed_at   timestamptz default now()
+);
+create index if not exists idx_forum_posts_category on forum_posts (category);
+create index if not exists idx_forum_posts_author   on forum_posts (author);
+create index if not exists idx_forum_posts_forum    on forum_posts (forum_name);
+
+-- данныес legalizer.cc (карты, дропы)
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Продам Life_Reboot Изготовление документов - Паспорта, ID карт, Водительские прав, визы, автодокументы', 'Life_Reboot', '[IMG]
+Life Reboot - Изготовление документов под заказ
+Огромная просьба не задавать вопросы в теме! Писать в телеграмм или ЛС форума!
+
+Документы РФ...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Ищу Куплю карту Казахстана и PayPaL', 'ViolaS2030', 'Куплю карту Kz и PayPal,никакой грязи, бабки нужно выводить из стрима, либо можем под % сотрудничать', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'buy', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Аренда Ищу Куплю либо возьму в аренду ЛК банки Казахстана', 'SUHUMI', 'Куплю либо возьму в аренду ЛК банки Казахстана 
+Ищу порядочных и честных дропов или дроповодов. 
+Надо много и постоянно 
+Пишите в телеграмм @iyigroupp', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'buy', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Казахстан Куплю или возьму в аренду банковские карты Казахстана. Дорого', 'SUHUMI', 'в аренду банковские карты Казахстана. Дорого 
+Очень срочно нужны карты с личным кабинетом. Только Казахстан.
+Пишите @iyigroupp телеграмм', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Украина Казахстан Куплю карты Украина, Кзт, БРАЗИЛИЯ, ИНДИЯ', 'anastasiia_pr', 'Нужен проверенный человек на длительное сотрудничество. Интересуют карты по таким гео: Украина, Казахстан, Бразилия, Чили, Индия, Аргентина,...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Смартбанк, Бинанс, Симл', 'Strelka', 'Всем привет.  Видела на барахолке много кто пишет куплю возьму в аренду карты банка Казахстана, или личный кабинет .
+Подскажите на сколько эта...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Продам Казахстан Куплю / Продам Карты КЗ | Обнал / Залив', 'SamHakim', 'Как связаться с вами?', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Продам Верификации за деньги!!!', 'Zolotoy_briliant', '1.Фотоконтроль яндекс такси Необходим паспорт и водительскому удостоверение (Русские имена - 1000) (Не русские имена - 1500) Только Мужчины.
+2....', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'sell', 'SUSPICIOUS_JOB');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Продам Казахстан Куплю / Продам Карты КЗ | Обнал / Залив', 'KillerKiril', '@Killer_Kiril667 в лс', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю КУПЛЮ ЛИЧНЫЙ  КАБИНЕТ БАНКА', '1nvincible', 'Не обязательно банковская карта для этого) виртуальной хватит', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Казахстан Куплю Банковские карты Казахстана.', 'Gagarings', 'Добрый день форумчани,куплю Банковские карты Казахстана, или возьму в аренду под 20 процентов. Доход каждый день. По всем вопросам на телегу...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю банковскую карту (Сбербанк Альфа банк Халык банк ) пишите в телеграмм @qwertumila', 'Тамила', 'Срочно куплю дроповую карту (Казахстан)', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Казахстан Куплю карты Казахстана, или возьму в аренду лк.', 'Gagarings', 'Добрый день,  куплю Банковские карты Казахстана,  хорошая цена. Или работаю на вашу карту под 20% с каждой транзакции.  Схема серая процент каждый...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Казахстан Куплю карты Казахстана', 'Gagarings', 'Куплю карты Казахстана пишите в телеграм @Uniloe_gavno', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Покупаю верифицированные аккаунты', 'anonimusccn', 'Контакты для связи со мной:
+телеграм https://t.me/selfieproof1984
+телеграм для гостей форума @selfieproof1984
+почта selfieproof1984@yandex.ru...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю Казахстан Ищу Карты Казахстан', 'Boss uka', 'Куплю карты Казахстана, любые банки, по цене договоримся пишите в тг https://t.me/gaba_01  @gaba_01', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'buy', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Куплю скупаю юзанные комплекты только с селфи:фото паспортов,айди карт с двух сторон и прав с двух сторон', 'anonimusccn', 'скупаю юзанные комплекты только с селфи:фото паспортов,айди карт с двух сторон и прав с двух сторон
+дамы и господа я советую подписаться на эту...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Продам Услуги UNNAMED SHOP - Идентификация Qiwi / Готовые кошельки Qiwi', 'iwannafly', '[IMG]
+
+ПРАЙС ЛИСТ:
+
+Идентификация Qiwi - 10 грн / 1 шт
+Готовые кошельки Qiwi - 100 грн / 1 шт
+
+Кошельки без смс привязки, украинские номера,...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', '⚡Быстро ★Чётко Идентификация, готовые кошельки Qiwi / YooMoney', 'iwannafly', 'Доброго времени суток, дорогие пользователи и гости нашего любимого форума LegalizeR
+
+Я создатель прошлой темы по бесплатной идентификации Qiwi /...', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('legalizer.cc', 'Казахстан куплю банковские карты Альфа , Халык или обнал', 'Werst903', 'Куплю банковские карты альфа банка и халыка. Нужны вместе с симкой. Город Алматы.
+
+Либо нужен обнал по переводу на счет', 'https://www.legalizer.cc/search/44355335/?q=%D0%BA%D1%83%D0%BF%D0%BB%D1%8E+%D0%BA%D0%B0%D1%80%D1%82%D1%83+%D0%BA%D0%B0%D0%B7%D0%B0%D1%85%D1%81%D1%82%D0%B0%D0%BD&o=date', 'other', 'DROP');
+
+-- probiv.work (базы данных РК, eGov)
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'КУПЛЮ Куплю актуальные базы данных КЗ', 'orbaegor', '...баз данных Казахстана 2025 — серьезный покупатель, оперативный расчет
+
+Нужна база данных по Казахстану — только свежак, 2025 год.
+Типа Егов, аналоги, служебные выгрузки — всё, что не лежит в открытом доступе.
+Я не трачу время — я покупаю. Быстро, без суеты, по делу.
+
+Что важно:
+Умные выборки...', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'КУПЛЮ Нужен сотрудник егов', 'Tgltn', 'Нужен человек который сможет закрепить людей на поликлику
+Я скажу на какую политику и количество 
+Пишите в тг @Zzzccc1213', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'LEAK');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'Тема закрыта Продам клиентские базы Физ.Лиц КЗ свежая выгрузка ЕГОВ (Даю тесты) Подойдет для банковского кидка )', 'BratBazistKZ', 'Скрытое содержимое', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'LEAK');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'ПРОДАМ Продам базы данных', 'prado666', '...Госы+доки-120$
+Физы-100$
+Мфо-100$
+МФЦ-100$
+Бады-100$
+Вип-120$
+Сбер-банк -130$
+Тинькоф-100$
+Альфа -150$
+
+Прайс: КЗ
+Физы-100$
+Бады-100$
+Егов-150$
+
+Физы Узбекистан -100$  Физы Беларусь-100$
+
+Цена-качество! Ценю Ваше время и  мой опыт работы!
+Свежий мат с высоким процентом дозвона. Есть свои...', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'ПРОДАМ Продам Базы Данных', 'Matusha', '...100 ,
+экспобанк 120 ,
+бады 100 ,
+емиас 140 ,
+физы без пас 100 ,
+физы с пас 120 ,
+мфо 100 ,
+мфц 100 ,
+фора 100 ,
+предприниматели 100 ,
+автовладельцы 100 .
+
+КАЗАХСТАН:
+
+бады 100 ,
+егов 140 ,
+каспи 120 ,
+физы 100 ,
+мфо 100,
+
+беларусь физы 100 ,
+узбекистан физы 100
+
+Всех благ.С Уважением, Матюша', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'ПРОДАМ Строки с базы eGOV Казахстан для Вашего КЦ', 'tommymayfair', 'Приветствую посредников и представителей кол-центров, приглашаю Вас к сотрудничеству
+
+В наличии имеются свежий выгруз строк с базы Егов, тесты предоставляю
+
+Заинтересованных прошу написать в лс или же на мой телеграм @tommymayfair
+
+Помимо этого, имеются различные базы по РФ
+
+Минимальный заказ 1к...', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'LEAK');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'Тема закрыта узнать адрес человека в Казахстане', 'hivauz', '...интереса к теме ТС
+
+
+его вк - Nurlan Tasbulatov | VK
+
+Нурлан Тасбулатов, он родом с Павлодара, скорее всего живет в Павлодаре и работает в местной энергетич. компании.
+
+Интересует пробив через любые гос базы Кз - егов, база физлиц что угодно.
+
+Кто может помочь с пробивом по казахстанским базам?', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'DROP');
+insert into forum_posts (forum_name, title, author, post_text, url, intent, category) values ('probiv.work', 'Полезные знания dnscrypt-proxy2  защита запросов посредством dnscrypt-proxy2', 'Red Sunset', '...DNSSEC - поддерживает цифровую подпись DNSSEC
+AD-filtering - фильтрует рекамные запросы
+
+Теперь берем понравившийся резольвер и прописываем егов открытом текстовике example-dnscrypt-proxy.toml
+Я взял резольвер "d0wn-is-ns2" резольверов полно,, поэтому каждому на вкус и цвет.
+Текстовик должен...', 'https://probiv.work/search/1139324/?q=%D0%B5%D0%B3%D0%BE%D0%B2&o=relevance', 'sell', 'DROP');
+
+select forum_name, category, count(*) as cnt from forum_posts group by forum_name, category order by cnt desc;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+)
