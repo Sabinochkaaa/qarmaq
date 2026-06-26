@@ -1,0 +1,9 @@
+{
+    "total_topics": 20,
+    "categories": {},
+    "intent_distribution": {
+        "sell": 5,
+        "buy": 3,
+        "other": 12
+    }
+}
