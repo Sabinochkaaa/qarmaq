@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qarmaq — Мониторинг</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #13161e;
+    --border:    #1f2433;
+    --accent:    #e8432d;
+    --accent2:   #f59e0b;
+    --accent3:   #3b82f6;
+    --green:     #22c55e;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Inter', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  /* HEADER */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: var(--accent);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+
+  .logo-text {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  .logo-sub {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+
+  .status-badge.live {
+    background: rgba(34,197,94,0.12);
+    border: 1px solid rgba(34,197,94,0.3);
+    color: var(--green);
+  }
+
+  .status-badge.backfill {
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.3);
+    color: var(--accent2);
+  }
+
+  .status-badge.offline {
+    background: rgba(100,116,139,0.12);
+    border: 1px solid rgba(100,116,139,0.3);
+    color: var(--muted);
+  }
+
+  .pulse {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.8); }
+  }
+
+  .last-update {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* GRID */
+  .grid-top {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  .grid-mid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  .grid-bot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* CARD */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  .card-label {
+    font-size: 11px;
+    font-family: var(--mono);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .card-value {
+    font-family: var(--mono);
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 6px;
+  }
+
+  .card-sub {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .card-value.red   { color: var(--accent); }
+  .card-value.amber { color: var(--accent2); }
+  .card-value.blue  { color: var(--accent3); }
+  .card-value.green { color: var(--green); }
+
+  /* КАТЕГОРИИ */
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cat-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .cat-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    width: 110px;
+    flex-shrink: 0;
+  }
+
+  .cat-bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .cat-bar {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+
+  .cat-count {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    width: 30px;
+    text-align: right;
+  }
+
+  .bar-наркотики  { background: #e8432d; }
+  .bar-дроп       { background: #f59e0b; }
+  .bar-пирамида   { background: #8b5cf6; }
+  .bar-казино     { background: #3b82f6; }
+  .bar-утечка_бд  { background: #ec4899; }
+
+  /* АКТИВНОСТЬ ПО ЧАСАМ */
+  .hours-grid {
+    display: grid;
+    grid-template-columns: repeat(24, 1fr);
+    gap: 3px;
+    align-items: end;
+    height: 60px;
+  }
+
+  .hour-bar {
+    background: var(--accent3);
+    border-radius: 2px 2px 0 0;
+    min-height: 3px;
+    opacity: 0.7;
+    transition: height 0.4s ease, opacity 0.2s;
+  }
+
+  .hour-bar:hover { opacity: 1; }
+
+  .hours-labels {
+    display: grid;
+    grid-template-columns: repeat(24, 1fr);
+    gap: 3px;
+    margin-top: 4px;
+  }
+
+  .hour-label {
+    font-family: var(--mono);
+    font-size: 8px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* ТОП КАНАЛОВ */
+  .top-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .top-row:last-child { border-bottom: none; }
+
+  .top-rank {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    width: 20px;
+    flex-shrink: 0;
+  }
+
+  .top-name {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .top-badge {
+    font-size: 10px;
+    font-family: var(--mono);
+    padding: 2px 7px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .badge-bot     { background: rgba(245,158,11,0.15); color: var(--accent2); }
+  .badge-channel { background: rgba(59,130,246,0.15); color: var(--accent3); }
+  .badge-invite  { background: rgba(139,92,246,0.15); color: #a78bfa; }
+
+  .top-count {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    width: 28px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* ИСТОЧНИКИ */
+  .source-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .source-row:last-child { border-bottom: none; }
+
+  .source-name {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-count {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent2);
+    font-weight: 600;
+  }
+
+  /* ERROR / EMPTY */
+  .empty {
+    color: var(--muted);
+    font-size: 12px;
+    font-family: var(--mono);
+    padding: 20px 0;
+    text-align: center;
+  }
+
+  .error-banner {
+    background: rgba(232,67,45,0.08);
+    border: 1px solid rgba(232,67,45,0.2);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--accent);
+    margin-bottom: 20px;
+    display: none;
+  }
+
+  @media (max-width: 900px) {
+    .grid-top { grid-template-columns: repeat(2, 1fr); }
+    .grid-mid, .grid-bot { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🪤</div>
+    <div>
+      <div class="logo-text">Qarmaq</div>
+      <div class="logo-sub">Система мониторинга</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <span class="last-update" id="lastUpdate">обновление...</span>
+    <div class="status-badge offline" id="statusBadge">
+      <div class="pulse"></div>
+      <span id="statusText">загрузка</span>
+    </div>
+  </div>
+</header>
+
+<div class="error-banner" id="errorBanner">
+  ⚠ Не удалось загрузить stats.json — убедись что скрипт запущен и файл находится в той же папке.
+</div>
+
+<!-- TOP STATS -->
+<div class="grid-top">
+  <div class="card">
+    <div class="card-label">Каналов под наблюдением</div>
+    <div class="card-value blue" id="statChannels">—</div>
+    <div class="card-sub" id="statLiveMode">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Сообщений обработано</div>
+    <div class="card-value" id="statTotal">—</div>
+    <div class="card-sub" id="statSuspiciousPct">—% подозрительных</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Подозрительных найдено</div>
+    <div class="card-value red" id="statSuspicious">—</div>
+    <div class="card-sub" id="statSuspiciousBreak">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Новых каналов / ботов</div>
+    <div class="card-value amber" id="statDiscovered">—</div>
+    <div class="card-sub" id="statDiscoveredBreak">— каналов · — ботов · — инвайтов</div>
+  </div>
+</div>
+
+<!-- MID -->
+<div class="grid-mid">
+  <!-- Активность по часам -->
+  <div class="card">
+    <div class="card-title">⏱ Активность по часам (UTC)</div>
+    <div class="hours-grid" id="hoursGrid"></div>
+    <div class="hours-labels" id="hoursLabels"></div>
+  </div>
+
+  <!-- Категории -->
+  <div class="card">
+    <div class="card-title">🏷 По категориям</div>
+    <div id="categoriesBlock">
+      <div class="empty">загрузка...</div>
+    </div>
+  </div>
+</div>
+
+<!-- BOT -->
+<div class="grid-bot">
+  <!-- Топ упоминаемых -->
+  <div class="card">
+    <div class="card-title">🔗 Топ упоминаемых каналов и ботов</div>
+    <div id="topMentioned">
+      <div class="empty">данные появятся после первых находок</div>
+    </div>
+  </div>
+
+  <!-- Топ источников -->
+  <div class="card">
+    <div class="card-title">📡 Топ источников подозрительного контента</div>
+    <div id="topSources">
+      <div class="empty">данные появятся после первых находок</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const STATS_FILE = 'stats.json';
+const REFRESH_MS = 5000;
+
+const CAT_LABELS = {
+  'наркотики':  '💊 наркотики',
+  'дроп':       '💳 дроп',
+  'пирамида':   '📈 пирамида',
+  'казино':     '🎰 казино',
+  'утечка_бд':  '🗄 утечка бд',
+};
+
+function fmt(n) {
+  return n === undefined || n === null ? '—' : Number(n).toLocaleString('ru-RU');
+}
+
+function setStatus(isLive) {
+  const badge = document.getElementById('statusBadge');
+  const text  = document.getElementById('statusText');
+  badge.className = 'status-badge ' + (isLive ? 'live' : 'backfill');
+  text.textContent = isLive ? 'LIVE' : 'BACKFILL';
+}
+
+function renderCategories(byCategory) {
+  const block = document.getElementById('categoriesBlock');
+  const total = Object.values(byCategory).reduce((a, b) => a + b, 0);
+  if (total === 0) {
+    block.innerHTML = '<div class="empty">нет подозрительных сообщений</div>';
+    return;
+  }
+  block.innerHTML = Object.entries(byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cat, count]) => {
+      const pct = total > 0 ? (count / total * 100).toFixed(1) : 0;
+      return `
+        <div class="cat-row">
+          <div class="cat-name">${CAT_LABELS[cat] || cat}</div>
+          <div class="cat-bar-wrap">
+            <div class="cat-bar bar-${cat}" style="width:${pct}%"></div>
+          </div>
+          <div class="cat-count">${count}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderHours(activityByHour) {
+  const grid   = document.getElementById('hoursGrid');
+  const labels = document.getElementById('hoursLabels');
+  const values = Array.from({length: 24}, (_, i) => activityByHour[String(i)] || 0);
+  const maxVal = Math.max(...values, 1);
+
+  grid.innerHTML = values.map((v, i) => {
+    const h = Math.max(4, Math.round(v / maxVal * 56));
+    const title = `${String(i).padStart(2,'0')}:00 — ${v} сообщ.`;
+    return `<div class="hour-bar" style="height:${h}px" title="${title}"></div>`;
+  }).join('');
+
+  labels.innerHTML = values.map((_, i) =>
+    `<div class="hour-label">${i % 4 === 0 ? String(i).padStart(2,'0') : ''}</div>`
+  ).join('');
+}
+
+function renderTopMentioned(top5) {
+  const block = document.getElementById('topMentioned');
+  if (!top5 || top5.length === 0) {
+    block.innerHTML = '<div class="empty">данные появятся после первых находок</div>';
+    return;
+  }
+  block.innerHTML = top5.map((item, i) => {
+    const badgeClass = `badge-${item.link_type || 'channel'}`;
+    const badgeText  = item.link_type || 'channel';
+    return `
+      <div class="top-row">
+        <div class="top-rank">${i + 1}</div>
+        <div class="top-name">${item.target || '?'}</div>
+        <div class="top-badge ${badgeClass}">${badgeText}</div>
+        <div class="top-count">${item.count}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderTopSources(topSources) {
+  const block = document.getElementById('topSources');
+  if (!topSources || Object.keys(topSources).length === 0) {
+    block.innerHTML = '<div class="empty">данные появятся после первых находок</div>';
+    return;
+  }
+  const sorted = Object.entries(topSources)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  block.innerHTML = sorted.map(([name, count]) => `
+    <div class="source-row">
+      <div class="source-name">${name}</div>
+      <div class="source-count">${count}</div>
+    </div>`).join('');
+}
+
+async function loadStats() {
+  try {
+    const res = await fetch(STATS_FILE + '?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+
+    document.getElementById('errorBanner').style.display = 'none';
+
+    // Верхние карточки
+    document.getElementById('statChannels').textContent = fmt(s.channels_monitored);
+    document.getElementById('statLiveMode').textContent =
+      s.live_mode ? '🟢 live-мониторинг активен' : '🟡 идёт бэкфилл...';
+
+    document.getElementById('statTotal').textContent = fmt(s.messages_total);
+    document.getElementById('statSuspiciousPct').textContent =
+      `${s.suspicious_percent ?? 0}% подозрительных`;
+
+    document.getElementById('statSuspicious').textContent = fmt(s.messages_suspicious);
+
+    const totalDisc = (s.discovered_channels_total || 0)
+                    + (s.discovered_bots_total || 0)
+                    + (s.discovered_invites_total || 0);
+    document.getElementById('statDiscovered').textContent = fmt(totalDisc);
+    document.getElementById('statDiscoveredBreak').textContent =
+      `${s.discovered_channels_total || 0} каналов · ${s.discovered_bots_total || 0} ботов · ${s.discovered_invites_total || 0} инвайтов`;
+
+    // Статус
+    setStatus(s.live_mode);
+
+    // Время обновления
+    if (s.last_updated) {
+      const d = new Date(s.last_updated);
+      document.getElementById('lastUpdate').textContent =
+        'обновлено ' + d.toLocaleTimeString('ru-RU');
+    }
+
+    // Графики и списки
+    renderCategories(s.by_category || {});
+    renderHours(s.activity_by_hour || {});
+    renderTopMentioned(s.top5_mentioned || []);
+    renderTopSources(s.top5_source_channels || {});
+
+  } catch (e) {
+    document.getElementById('errorBanner').style.display = 'block';
+    document.getElementById('statusBadge').className = 'status-badge offline';
+    document.getElementById('statusText').textContent = 'офлайн';
+    console.warn('stats load error:', e);
+  }
+}
+
+// Инициализация
+loadStats();
+setInterval(loadStats, REFRESH_MS);
+</script>
+</body>
+</html>
